@@ -7,17 +7,30 @@ def load_all_data():
     try:
         stores = pd.read_csv('stores.csv')
         tariffs = pd.read_csv('tariffs.csv')
+        # تنظيف أسماء الأعمدة من أي مسافات زائدة
+        stores.columns = stores.columns.str.strip()
+        tariffs.columns = tariffs.columns.str.strip()
         return stores, tariffs
-    except:
+    except Exception as e:
+        st.error(f"Error loading files: {e}")
         return None, None
 
-st.set_page_config(page_title="LABDIS Skhirat Hub v11", layout="wide")
+st.set_page_config(page_title="LABDIS Skhirat Hub v13", layout="wide")
 st.title("🚚 LABDIS Skhirat Optimized Router")
 st.markdown("### Priority: Code 200 | Routing: Far to Near | Load: 100%")
 
 stores_df, tariffs_df = load_all_data()
 
-if stores_df is not None:
+if stores_df is not None and tariffs_df is not None:
+    # --- التحقق من أسماء الأعمدة بناءً على ملفك الأخير ---
+    # أعمدة ملف tariffs.csv كما تظهر في GitHub الخاص بك:
+    # 'Ville / City', 'Vehicule', 'Activit', 'Tarif', 'Capacit (Palettes)', 'Prestataire'
+    
+    col_city = 'Ville / City'
+    col_truck = 'Vehicule'  # تم التعديل من Véhicule
+    col_act = 'Activit'     # تم التعديل من Activité
+    col_price = 'Tarif'
+
     # --- SIDEBAR CONFIGURATION ---
     st.sidebar.header("🚛 Fleet Availability")
     avail_32T = st.sidebar.number_input("32T Available (33 PLT):", min_value=0, value=10)
@@ -40,10 +53,9 @@ if stores_df is not None:
         if data.empty:
             st.warning("No orders found for this wave.")
         else:
-            # --- LOGIC: PRIORITY & GEOGRAPHY ---
-            # Code 200 gets Priority 0 (First), others get Priority 1
+            # --- LOGIC: PRIORITY (Code 200) & GEOGRAPHY ---
             data['is_priority'] = data['Store_Code'].apply(lambda x: 0 if x == 200 else 1)
-            # Sort: Priority first, then Far Zones, then Cities
+            # ترتيب من الأبعد (Zone تنازلي) ومن الأولويات
             data = data.sort_values(by=['is_priority', 'Zone', 'City'], ascending=[True, False, False])
 
             st.header("🚛 2. Strategic Routing Schedule")
@@ -51,53 +63,36 @@ if stores_df is not None:
             trucks_list = []
             rem_32, rem_19, rem_7 = avail_32T, avail_19T, avail_7T
 
-            # Grouping Engine
             for (zone, truck_limit), group in data.groupby(['Zone', 'Max_Truck_Allowed'], sort=False):
-                if truck_limit == '32T': 
-                    nominal_cap = 33
-                elif truck_limit == '19T': 
-                    nominal_cap = 18
-                else: 
-                    nominal_cap = 12 # High-cap 7T
+                if truck_limit == '32T': nominal_cap = 33
+                elif truck_limit == '19T': nominal_cap = 18
+                else: nominal_cap = 12 
                 
                 max_cap = nominal_cap * 1.04
-                
                 c_load, c_stores, c_cities, c_fleg, c_sec = 0, [], [], 0, 0
 
                 for _, row in group.iterrows():
                     if c_load + row['Total_PLT'] <= max_cap:
                         c_load += row['Total_PLT']
-                        store_label = f"⭐ {row['Store_Name']}" if row['Store_Code'] == 200 else row['Store_Name']
-                        c_stores.append(store_label)
-                        if row['City'] not in c_cities:
-                            c_cities.append(row['City'])
+                        label = f"⭐ {row['Store_Name']}" if row['Store_Code'] == 200 else row['Store_Name']
+                        c_stores.append(label)
+                        if row['City'] not in c_cities: c_cities.append(row['City'])
                         c_fleg += row['Fleg_PLT']
                         c_sec += row['Sec_PLT']
                     else:
-                        # Dispatch completed truck
                         trucks_list.append({
                             "Zone": zone, "Type": truck_limit, "Load": c_load,
                             "Stores": c_stores, "Cities": c_cities,
                             "Fleg": c_fleg, "Sec": c_sec, "Cap": nominal_cap
                         })
-                        # Update Inventory
                         if truck_limit == '32T': rem_32 -= 1
                         elif truck_limit == '19T': rem_19 -= 1
                         else: rem_7 -= 1
-                        
-                        # Reset for next truck
-                        c_load = row['Total_PLT']
-                        c_stores = [f"⭐ {row['Store_Name']}" if row['Store_Code'] == 200 else row['Store_Name']]
-                        c_cities = [row['City']]
+                        c_load, c_stores, c_cities = row['Total_PLT'], [f"⭐ {row['Store_Name']}" if row['Store_Code'] == 200 else row['Store_Name']], [row['City']]
                         c_fleg, c_sec = row['Fleg_PLT'], row['Sec_PLT']
 
-                # Last truck in the group
                 if c_stores:
-                    trucks_list.append({
-                        "Zone": zone, "Type": truck_limit, "Load": c_load,
-                        "Stores": c_stores, "Cities": c_cities,
-                        "Fleg": c_fleg, "Sec": c_sec, "Cap": nominal_cap
-                    })
+                    trucks_list.append({"Zone": zone, "Type": truck_limit, "Load": c_load, "Stores": c_stores, "Cities": c_cities, "Fleg": c_fleg, "Sec": c_sec, "Cap": nominal_cap})
                     if truck_limit == '32T': rem_32 -= 1
                     elif truck_limit == '19T': rem_19 -= 1
                     else: rem_7 -= 1
@@ -109,32 +104,30 @@ if stores_df is not None:
                 activity = "Fleg" if t["Fleg"] > 0 else "Sec"
                 main_city = t["Cities"][0]
                 
-                p_match = tariffs_df[(tariffs_df['Ville / City'] == main_city) & 
-                                     (tariffs_df['Véhicule'] == t["Type"]) & 
-                                     (tariffs_df['Activité'] == activity)]
+                # تطابق التكلفة مع أسماء الأعمدة الجديدة
+                p_match = tariffs_df[(tariffs_df[col_city] == main_city) & 
+                                     (tariffs_df[col_truck] == t["Type"]) & 
+                                     (tariffs_df[col_act] == activity)]
                 
-                base_p = price_match.iloc[0]['Tarif (MAD)'] if not p_match.empty else 0
-                total_c = base_p + (len(t["Stores"]) - 1) * (STOP_FLEG if activity == "Fleg" else STOP_SEC)
+                # تنظيف السعر من كلمة MAD وتحويله لرقم
+                raw_price = p_match.iloc[0][col_price] if not p_match.empty else "0"
+                if isinstance(raw_price, str):
+                    clean_price = float(raw_price.replace('MAD', '').replace(' ', '').replace(',', ''))
+                else:
+                    clean_price = float(raw_price)
+
+                total_c = clean_price + (len(t["Stores"]) - 1) * (STOP_FLEG if activity == "Fleg" else STOP_SEC)
 
                 results.append({
-                    "Truck_ID": f"TRK-{i+1:02d}", 
-                    "Zone": t["Zone"], 
-                    "Truck_Type": t["Type"],
+                    "Truck_ID": f"TRK-{i+1:02d}", "Zone": t["Zone"], "Type": t["Type"],
                     "Path": " ➡️ ".join(t["Cities"]),
                     "Deliveries": " | ".join(t["Stores"]),
-                    "Payload": round(t["Load"], 1), 
-                    "Efficiency_%": round(eff, 1),
+                    "Payload": round(t["Load"], 1), "Efficiency_%": round(eff, 1),
                     "Cost (MAD)": total_c
                 })
 
             final_df = pd.DataFrame(results)
-
-            def style_eff(val):
-                if 96 <= val <= 104: 
-                    return 'background-color: #28a745; color: white'
-                return 'background-color: #ffc107; color: black'
-
-            st.dataframe(final_df.style.applymap(style_eff, subset=['Efficiency_%']), use_container_width=True)
+            st.dataframe(final_df.style.applymap(lambda v: 'background-color: #28a745; color: white' if 96 <= v <= 104 else 'background-color: #ffc107', subset=['Efficiency_%']), use_container_width=True)
 
             # --- DASHBOARD ---
             st.divider()
@@ -143,6 +136,3 @@ if stores_df is not None:
             with c2: st.metric("19T Used", f"{avail_19T - rem_19} / {avail_19T}")
             with c3: st.metric("7T Used", f"{avail_7T - rem_7} / {avail_7T}")
             with c4: st.metric("Total Cost", f"{final_df['Cost (MAD)'].sum():,.2f} MAD")
-
-else:
-    st.error("Please ensure 'stores.csv' and 'tariffs.csv' are uploaded to your GitHub repository.")
