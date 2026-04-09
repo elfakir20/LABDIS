@@ -1,130 +1,122 @@
 import streamlit as st
 import pandas as pd
-import os
+import numpy as np
 
-# 1. وظيفة تحميل البيانات وتنظيفها
 @st.cache_data
 def load_all_data():
-    base_path = os.path.dirname(__file__)
-    stores_path = os.path.join(base_path, 'stores.csv')
-    tariffs_path = os.path.join(base_path, 'tariffs.csv')
-    
     try:
-        if os.path.exists(stores_path) and os.path.exists(tariffs_path):
-            stores = pd.read_csv(stores_path)
-            tariffs = pd.read_csv(tariffs_path)
-            
-            # تحويل الأثمان إلى أرقام وحذف القيم غير الصحيحة
-            tariffs['Price'] = pd.to_numeric(tariffs['Price'], errors='coerce')
-            tariffs = tariffs.dropna(subset=['Price'])
-            
-            # تنظيف النصوص لضمان مطابقة دقيقة
-            for col in ['Truck', 'Type', 'City']:
-                tariffs[col] = tariffs[col].astype(str).str.strip()
-            tariffs['Truck'] = tariffs['Truck'].str.upper()
-            
-            return stores, tariffs
-        else:
-            return None, None
-    except Exception as e:
-        st.error(f"Error reading CSV files: {e}")
+        # تأكد من أن الأسماء في الملفات مطابقة لما اتفقنا عليه (City, Zone, Truck, Type, Price)
+        stores = pd.read_csv('stores.csv') 
+        tariffs = pd.read_csv('tariffs.csv')
+        return stores, tariffs
+    except:
         return None, None
 
-st.set_page_config(page_title="LABDIS Elite v18", layout="wide")
-st.title("🚀 LABDIS Elite Logistics AI")
-st.info("Skhirat Hub | Priority 200 | Cost-Efficiency Model")
+st.set_page_config(page_title="LABDIS Detailed Router", layout="wide")
+st.title("🚛 LABDIS AI: Detailed Store Assignment")
+st.subheader("Skhirat Hub | Full Load | Store-by-Store Breakdown")
 
 stores_df, tariffs_df = load_all_data()
 
 if stores_df is not None:
-    # --- القائمة الجانبية: التحكم في الأسطول ---
+    # --- القائمة الجانبية لإدارة الأسطول ---
     with st.sidebar:
-        st.header("🚛 Fleet Inventory")
-        f32 = st.number_input("32T (33 PLT):", 0, 100, 10)
-        f19 = st.number_input("19T (18 PLT):", 0, 100, 5)
-        f7 = st.number_input("7T (12 PLT):", 0, 100, 5)
-        
-        st.divider()
-        wave = st.selectbox("Shipping Wave", ["15:00-23:00", "23:00-7:00"])
+        st.header("🚛 Available Fleet")
+        f32 = st.number_input("32T (33 PLT):", 0, 50, 10)
+        f19 = st.number_input("19T (18 PLT):", 0, 50, 5)
+        f7 = st.number_input("7T (12 PLT):", 0, 50, 5)
+        wave = st.selectbox("Wave", ["15:00-23:00", "23:00-7:00"])
 
-    # --- المرحلة 1: معالجة الطلبات ---
     uploaded = st.file_uploader("Upload Daily Orders CSV", type=['csv'])
 
     if uploaded:
         orders = pd.read_csv(uploaded).fillna(0)
         data = pd.merge(orders, stores_df, on='Store_Code', how='left')
         data = data[data['Loading Window'] == wave].copy()
+        data['Total_PLT'] = data['Fleg_PLT'] + data['Sec_PLT']
         
-        # منطق الأولويات: كود 200 أولاً ثم الأبعد عن الصخيرات
+        # ترتيب الأولويات: كود 200 أولاً، ثم الأبعد عن الصخيرات
         data['is_200'] = data['Store_Code'].apply(lambda x: 0 if x == 200 else 1)
         data = data.sort_values(['is_200', 'Zone', 'City'], ascending=[True, False, False])
 
-        # --- المرحلة 2: محرك تحسين التكاليف ---
         dispatched_trucks = []
         fleet_rem = {'32T': f32, '19T': f19, '7T': f7}
 
+        # محرك التوزيع الذكي
         for (zone, truck_limit), group in data.groupby(['Zone', 'Max_Truck_Allowed'], sort=False):
-            remaining_vol = group['Fleg_PLT'].sum() + group['Sec_PLT'].sum()
-            activity = "Fleg" if group['Fleg_PLT'].sum() > group['Sec_PLT'].sum() else "Sec"
-            main_city = str(group['City'].iloc[0])
-
-            while remaining_vol >= 7.5:
-                options = []
-                for t_type, cap in [('32T', 33), ('19T', 18), ('7T', 12)]:
-                    if fleet_rem[t_type] > 0:
-                        # البحث عن السعر المطابق في ملف التكاليف
-                        p_match = tariffs_df[
-                            (tariffs_df['City'].str.lower() == main_city.lower()) & 
-                            (tariffs_df['Truck'] == t_type) & 
-                            (tariffs_df['Type'].str.contains(activity, case=False, na=False))
-                        ]
-                        
-                        if not p_match.empty:
-                            try:
-                                price = float(p_match.iloc[0]['Price'])
-                                options.append({'type': t_type, 'cap': cap, 'price': price, 'cpp': price/cap})
-                            except: continue
-
-                if not options: break
-
-                # اختيار الشاحنة الأنسب (توازن بين الامتلاء 100% وأقل تكلفة)
+            main_city = group['City'].iloc[0]
+            # تحويل المتاجر إلى قائمة "بليطات" قابلة للتوزيع
+            store_queue = group[['Store_Name', 'Total_PLT', 'Store_Code']].to_dict('records')
+            
+            while store_queue:
+                # تحديد أفضل شاحنة بناءً على الحجم المتبقي والتكلفة
+                total_pending = sum(s['Total_PLT'] for s in store_queue)
+                
+                # اختيار نوع الشاحنة (32T ثم 19T ثم 7T) بناءً على المتاح والامتلاء
                 best_t = None
-                for opt in sorted(options, key=lambda x: x['cap'], reverse=True):
-                    if remaining_vol >= opt['cap'] * 0.96:
-                        best_t = opt
-                        break
-                if not best_t: best_t = min(options, key=lambda x: x['cpp'])
+                for t_type, cap in [('32T', 33), ('19T', 18), ('7T', 12)]:
+                    if fleet_rem[t_type] > 0 and (truck_limit == t_type or truck_limit == '32T' or (truck_limit == '19T' and t_type == '7T')):
+                        if total_pending >= cap * 0.96 or (t_type == '7T' and total_pending > 0):
+                            best_t = {'type': t_type, 'cap': cap}
+                            break
+                
+                if not best_t: break
 
-                load = min(remaining_vol, best_t['cap'] * 1.04)
+                # ملء الشاحنة بالمتاجر
+                current_truck_load = 0
+                truck_manifest = []
+                max_cap = best_t['cap'] * 1.04
                 
+                indices_to_remove = []
+                for i, store in enumerate(store_queue):
+                    space_left = max_cap - current_truck_load
+                    if space_left <= 0: break
+                    
+                    if store['Total_PLT'] <= space_left:
+                        # المتجر يدخل بالكامل
+                        truck_manifest.append(f"{store['Store_Name']} ({store['Total_PLT']} PLT)")
+                        current_truck_load += store['Total_PLT']
+                        indices_to_remove.append(i)
+                    else:
+                        # تقسيم المتجر (يأخذ ما تبقى من مساحة والباقي يبقى في الطابور)
+                        truck_manifest.append(f"{store['Store_Name']} ({round(space_left, 1)} PLT - PARTIAL)")
+                        store['Total_PLT'] -= space_left
+                        current_truck_load += space_left
+                        # لا نحذف المتجر من القائمة لأنه مازال فيه بليطات متبقية
+                        break
+                
+                # حذف المتاجر التي شحنت بالكامل
+                for index in sorted(indices_to_remove, reverse=True):
+                    store_queue.pop(index)
+
+                # حساب التكلفة
+                p_match = tariffs_df[(tariffs_df['City'] == main_city) & (tariffs_df['Truck'] == best_t['type'])]
+                cost = p_match.iloc[0]['Price'] if not p_match.empty else 0
+
                 dispatched_trucks.append({
-                    "TRK_ID": f"TRK-{len(dispatched_trucks)+1:02d}",
-                    "Zone": zone, "Type": best_t['type'],
-                    "Load": round(load, 1), "Efficiency_%": round((load/best_t['cap'])*100, 1),
-                    "Cost_MAD": best_t['price'], "City": main_city
+                    "Truck_Type": best_t['type'],
+                    "Zone": zone,
+                    "Destination": main_city,
+                    "Total_Load": round(current_truck_load, 1),
+                    "Efficiency_%": round((current_truck_load / best_t['cap']) * 100, 1),
+                    "Detailed_Manifest": " + ".join(truck_manifest),
+                    "Cost_MAD": cost
                 })
-                
-                remaining_vol -= load
                 fleet_rem[best_t['type']] -= 1
 
-        # --- المرحلة 3: عرض النتائج ---
+        # عرض النتائج
         if dispatched_trucks:
             res_df = pd.DataFrame(dispatched_trucks)
-            st.header("📝 Final Dispatch Plan")
+            st.header("📋 Loading Manifest (Who goes with whom)")
             
-            def style_eff(v):
-                color = '#27ae60' if 96 <= v <= 104 else '#f39c12'
-                return f'background-color: {color}; color: white; font-weight: bold'
-
-            # تعديل applymap إلى map هنا لحل المشكلة
-            st.dataframe(res_df.style.map(style_eff, subset=['Efficiency_%']), use_container_width=True)
+            # عرض الجدول مع التركيز على عمود المتاجر التفصيلي
+            st.dataframe(res_df[['Truck_Type', 'Zone', 'Detailed_Manifest', 'Total_Load', 'Efficiency_%', 'Cost_MAD']], use_container_width=True)
             
+            # رسومات توضيحية
             st.divider()
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Trips", len(res_df))
-            c2.metric("Total Cost (MAD)", f"{res_df['Cost_MAD'].sum():,.2f}")
-            c3.metric("Avg Efficiency", f"{res_df['Efficiency_%'].mean():.1f}%")
+            st.metric("Total Transportation Cost", f"{res_df['Cost_MAD'].sum():,.2f} MAD")
         else:
-            st.warning("No trucks could be matched for this volume.")
+            st.warning("No trucks could be filled to 100%. Check your fleet or volume.")
+
 else:
-    st.error("Missing files: app.py, stores.csv, and tariffs.csv must be in the same folder.")
+    st.error("Missing Data Files on GitHub.")
