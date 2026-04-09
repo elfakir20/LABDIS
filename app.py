@@ -63,7 +63,7 @@ if stores_df is not None:
                     base_price = match.iloc[0]['Tarif (MAD)'] if not match.empty else 0
                     return pd.Series([truck, base_price, activity, total_plts])
 
-                wave_plan[['Assigned_Truck', 'Base_Price', 'Main_Activity', 'Total_Pallets']] = wave_plan.apply(apply_business_rules, axis=1)
+                wave_plan[['Assigned_Truck', 'Base_Price', 'Main_Activity', 'Total_Pallets']] = wave_plan.apply(apply_complex_rules, axis=1)
 
                 # 3. Routing & Cost Grouping (Same City/Route Grouping)
                 # Group stores in the same city to calculate multi-drop
