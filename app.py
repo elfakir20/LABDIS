@@ -1,86 +1,116 @@
 import streamlit as st
 import pandas as pd
 
-# Load master data with error handling
+# 1. Load Data
 @st.cache_data
 def load_data():
     try:
-        # Using simplified file names as agreed
         stores = pd.read_csv('stores.csv')
         tariffs = pd.read_csv('tariffs.csv')
         return stores, tariffs
-    except FileNotFoundError:
+    except Exception as e:
+        st.error(f"Error loading files: {e}")
         return None, None
 
-# Page configuration
-st.set_page_config(page_title="LABDIS Logistics Optimizer", layout="wide")
-st.title("🚚 LABDIS Smart Logistics Planner")
+st.set_page_config(page_title="LABDIS Smart Logistics", layout="wide")
+st.title("🚚 LABDIS Ultimate Logistics Optimizer")
 
 stores_df, tariffs_df = load_data()
 
-if stores_df is None:
-    st.error("❌ Master files (stores.csv or tariffs.csv) not found in GitHub. Please check file names.")
-else:
-    # Sidebar Settings
-    st.sidebar.header("⚙️ Planning Settings")
-    wave = st.sidebar.selectbox("Select Loading Wave:", ["15:00-23:00", "23:00-7:00"])
-    activity = st.sidebar.selectbox("Select Activity Type:", ["Fleg", "Sec", "Surgele"])
+if stores_df is not None:
+    # --- SIDEBAR CONFIGURATION ---
+    st.sidebar.header("⚙️ Dispatch Settings")
+    wave_input = st.sidebar.selectbox("Current Departure (Wave):", ["15:00-23:00", "23:00-7:00"])
+    
+    # Costs & Capacities
+    STOP_FLEG = 75
+    STOP_SEC = 150
+    CAP_32T = 33
+    CAP_19T = 18
 
-    # Main Interface - Upload Orders
+    # --- UPLOAD SECTION ---
     st.header("📥 Upload Daily Orders")
-    uploaded_file = st.file_uploader("Upload your daily orders CSV file", type=['csv'])
+    st.info("Your CSV should have: Store_Code, Fleg_Pallets, Sec_Pallets")
+    uploaded_file = st.file_uploader("Upload CSV File", type=['csv'])
 
     if uploaded_file:
         try:
-            daily_orders = pd.read_csv(uploaded_file)
+            orders = pd.read_csv(uploaded_file).fillna(0)
             
-            # Check for the required Store_Code column
-            if 'Store_Code' in daily_orders.columns:
-                # 1. Merge orders with store database
-                res = pd.merge(daily_orders, stores_df, on='Store_Code', how='left')
-                
-                # 2. Filter by selected Loading Wave
-                res_wave = res[res['Loading Window'] == wave].copy()
-                
-                # 3. Cost Calculation Logic based on City, Truck Type, and Activity
-                def calculate_estimated_cost(row):
+            # Merge with Store DB
+            full_data = pd.merge(orders, stores_df, on='Store_Code', how='left')
+            
+            # 1. Filter by Wave
+            wave_plan = full_data[full_data['Loading Window'] == wave_input].copy()
+            
+            if wave_plan.empty:
+                st.warning(f"No orders found for Wave {wave_input}")
+            else:
+                # 2. Logic: Process each store's constraints
+                def apply_complex_rules(row):
                     truck = row['Max_Truck_Allowed']
                     city = row['City']
-                    # Look up in tariff table
+                    total_plts = row['Fleg_Pallets'] + row['Sec_Pallets']
+                    
+                    # Decide Activity Type for Pricing (Priority to Fleg if both exist)
+                    activity = "Fleg" if row['Fleg_Pallets'] > 0 else "Sec"
+                    
+                    # Tariff Lookup
                     match = tariffs_df[(tariffs_df['Ville / City'] == city) & 
                                        (tariffs_df['Véhicule'] == truck) & 
                                        (tariffs_df['Activité'] == activity)]
-                    if not match.empty:
-                        return match.iloc[0]['Tarif (MAD)']
-                    return 0
+                    
+                    base_price = match.iloc[0]['Tarif (MAD)'] if not match.empty else 0
+                    return pd.Series([truck, base_price, activity, total_plts])
 
-                res_wave['Estimated_Cost'] = res_wave.apply(calculate_estimated_cost, axis=1)
+                wave_plan[['Assigned_Truck', 'Base_Price', 'Main_Activity', 'Total_Pallets']] = wave_plan.apply(apply_business_rules, axis=1)
+
+                # 3. Routing & Cost Grouping (Same City/Route Grouping)
+                # Group stores in the same city to calculate multi-drop
+                summary = wave_plan.groupby(['City', 'Zone', 'Assigned_Truck', 'Main_Activity']).agg({
+                    'Store_Name': 'count',
+                    'Total_Pallets': 'sum',
+                    'Fleg_Pallets': 'sum',
+                    'Sec_Pallets': 'sum',
+                    'Base_Price': 'max'
+                }).reset_index()
+
+                # Calculate Extra Stop Fees
+                def calc_extra_stops(row):
+                    stops = row['Store_Name'] - 1
+                    fee = STOP_FLEG if row['Main_Activity'] == "Fleg" else STOP_SEC
+                    return stops * fee if stops > 0 else 0
+
+                summary['Extra_Stop_Fees'] = summary.apply(calc_extra_stops, axis=1)
+                summary['Final_Cost'] = summary['Base_Price'] + summary['Extra_Stop_Fees']
+
+                # --- UI DISPLAY ---
+                st.subheader(f"📊 Live Plan for Wave {wave_input}")
                 
-                # UI Result Header
-                st.subheader(f"✅ Shipment Plan: {wave} | Activity: {activity}")
-                
-                # Dynamic Warnings for Restricted Streets (19T)
-                for i, row in res_wave.iterrows():
-                    if row['Max_Truck_Allowed'] == '19T':
-                        st.warning(f"🚨 Constraint: **{row['Store_Name']}** ({row['City']}) allows **19T Trucks** only.")
-                
-                # Display Resulting Plan
-                display_cols = ['Store_Code', 'Store_Name', 'City', 'Max_Truck_Allowed', 'Receiving Window', 'Estimated_Cost']
-                st.dataframe(res_wave[display_cols], use_container_width=True)
-                
-                # Financial Dashboard
+                # Alerts for Constraints
+                for _, row in wave_plan.iterrows():
+                    if row['Assigned_Truck'] == '19T':
+                        st.warning(f"⚠️ **Street Constraint:** {row['Store_Name']} ({row['City']}) - 19T Max.")
+
+                # Table of details
+                st.write("### 📝 Detailed Order Breakdown")
+                st.dataframe(wave_plan[['Store_Code', 'Store_Name', 'City', 'Fleg_Pallets', 'Sec_Pallets', 'Total_Pallets', 'Assigned_Truck', 'Receiving Window']])
+
+                # Financial Summary
                 st.divider()
-                total_cost = res_wave['Estimated_Cost'].sum()
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Total Estimated Cost", f"{total_cost:,.2f} MAD")
-                with col2:
-                    st.metric("Total Stops", len(res_wave))
-                
-            else:
-                st.error("The uploaded file must contain a 'Store_Code' column.")
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
+                st.write("### 💰 Financial & Capacity Summary")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("Total Pallets to Load", f"{wave_plan['Total_Pallets'].sum()} PLT")
+                with c2:
+                    st.metric("Total Logistics Cost", f"{summary['Final_Cost'].sum():,.2f} MAD")
+                with c3:
+                    st.metric("Total Points of Delivery", len(wave_plan))
 
-# Footer
-st.caption("Powered by LABDIS Logistics AI - 2026")
+                st.write("#### 🚚 Suggested Truck Loading (Grouped by Route)")
+                st.table(summary.rename(columns={'Store_Name': 'Drops', 'Base_Price': 'Main Tariff', 'Final_Cost': 'Route Total'}))
+
+        except Exception as e:
+            st.error(f"Critical Logic Error: {e}")
+
+st.caption("LABDIS Logistics Optimizer v4.0 - All Constraints Enabled")
