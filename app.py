@@ -1,124 +1,134 @@
 import streamlit as st
 import pandas as pd
 
-# 1. Load & Clean Master Data
+# 1. Load & Auto-Fix Master Data
 @st.cache_data
 def load_data():
     try:
-        # Load stores and tariffs
         stores = pd.read_csv('stores.csv')
         tariffs = pd.read_csv('tariffs.csv')
         
-        # Clean column names (Remove spaces and handle 'é' issue)
+        # Clean all column names from spaces or hidden characters
         stores.columns = stores.columns.str.strip()
         tariffs.columns = tariffs.columns.str.strip()
         
-        # Standardize Tariff Columns to avoid 'é' errors
-        # This renames 'Véhicule' to 'Truck' and 'Activité' to 'Activity' etc.
+        # Mapping columns by position to avoid encoding issues with characters like 'é'
+        # Position 0: City, 1: Truck, 2: Activity, 3: Price
         tariffs = tariffs.rename(columns={
-            'Ville / City': 'City',
-            'Véhicule': 'Truck',
-            'Activité': 'Activity',
-            'Tarif (MAD)': 'Price'
+            tariffs.columns[0]: 'City',
+            tariffs.columns[1]: 'Truck',
+            tariffs.columns[2]: 'Activity',
+            tariffs.columns[3]: 'Price'
         })
         
         return stores, tariffs
     except Exception as e:
-        st.error(f"Setup Error: {e}")
+        st.error(f"System Setup Error: {e}")
         return None, None
 
-# App Config
-st.set_page_config(page_title="LABDIS Ultimate v5.0", layout="wide")
-st.title("🚚 LABDIS Logistics Optimizer v5.0")
+# App UI Config
+st.set_page_config(page_title="LABDIS Ultimate v6.0", layout="wide")
+st.title("🚚 LABDIS Logistics Optimizer v6.0")
 
 stores_df, tariffs_df = load_data()
 
 if stores_df is not None:
-    # --- SIDEBAR ---
-    st.sidebar.header("⚙️ Dispatch Options")
+    # --- SIDEBAR CONFIG ---
+    st.sidebar.header("⚙️ Operation Settings")
     selected_wave = st.sidebar.selectbox("Departure Wave:", ["15:00-23:00", "23:00-7:00"])
     
-    # Cost Constants
-    EXTRA_FLEG = 75
-    EXTRA_SEC = 150
+    # Financial Rules
+    EXTRA_STOP_FLEG = 75
+    EXTRA_STOP_SEC = 150
 
-    # --- UPLOAD DAILY ORDERS ---
+    # --- UPLOAD SECTION ---
     st.header("📥 Upload Daily Orders")
-    st.info("Required CSV Columns: Store_Code, Fleg_Pallets, Sec_Pallets")
-    uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
+    st.markdown("Ensure CSV has these columns: `Store_Code`, `Fleg_Pallets`, `Sec_Pallets`")
+    uploaded_file = st.file_uploader("Upload Daily Orders", type=['csv'])
 
     if uploaded_file:
         try:
-            # Load orders
-            orders = pd.read_csv(uploaded_file).fillna(0)
+            # Load and clean uploaded orders
+            orders = pd.read_csv(uploaded_file)
+            orders.columns = orders.columns.str.strip()
+            orders = orders.fillna(0)
             
-            # Merge with Stores
+            # Merge with Stores Database
             df = pd.merge(orders, stores_df, on='Store_Code', how='left')
             
-            # Filter by Wave
+            # Filter by Wave (Departure Time)
             df_wave = df[df['Loading Window'] == selected_wave].copy()
             
             if df_wave.empty:
-                st.warning(f"No stores found for wave: {selected_wave}")
+                st.warning(f"No orders matching the wave: {selected_wave}")
             else:
-                # --- LOGIC ENGINE ---
-                def get_logistics_info(row):
-                    truck = row['Max_Truck_Allowed']
-                    city = row['City']
-                    fleg = row['Fleg_Pallets']
-                    sec = row['Sec_Pallets']
+                # --- CORE LOGIC ENGINE ---
+                def process_logistics(row):
+                    # Physical & Logistics Constraints
+                    truck = str(row['Max_Truck_Allowed']).strip()
+                    city = str(row['City']).strip()
+                    fleg_qty = float(row['Fleg_Pallets'])
+                    sec_qty = float(row['Sec_Pallets'])
                     
-                    # Rule: Priority to Fleg pricing if it exists
-                    activity = "Fleg" if fleg > 0 else "Sec"
+                    # Logic: Determine pricing activity
+                    # If Fleg exists, we use Fleg tariff, else Sec
+                    activity = "Fleg" if fleg_qty > 0 else "Sec"
                     
-                    # Tariff Match
-                    match = tariffs_df[(tariffs_df['City'] == city) & 
-                                       (tariffs_df['Truck'] == truck) & 
-                                       (tariffs_df['Activity'] == activity)]
+                    # Tariff Matching with strict cleaning
+                    match = tariffs_df[
+                        (tariffs_df['City'].str.strip() == city) & 
+                        (tariffs_df['Truck'].str.strip() == truck) & 
+                        (tariffs_df['Activity'].str.strip() == activity)
+                    ]
                     
-                    price = match.iloc[0]['Price'] if not match.empty else 0
-                    return pd.Series([truck, price, activity, fleg + sec])
+                    price = float(match.iloc[0]['Price']) if not match.empty else 0
+                    return pd.Series([truck, price, activity, fleg_qty + sec_qty])
 
-                df_wave[['Truck_Type', 'Base_Price', 'Main_Activity', 'Total_PLT']] = df_wave.apply(get_logistics_info, axis=1)
+                # Apply logic
+                df_wave[['Truck_Type', 'Base_Price', 'Calc_Activity', 'Total_PLT']] = df_wave.apply(process_logistics, axis=1)
 
-                # --- ROUTE GROUPING (Multi-Drop) ---
-                route_summary = df_wave.groupby(['City', 'Zone', 'Truck_Type', 'Main_Activity']).agg({
+                # --- ROUTE CONSOLIDATION (Multi-Drop Logic) ---
+                route_summary = df_wave.groupby(['City', 'Zone', 'Truck_Type', 'Calc_Activity']).agg({
                     'Store_Name': 'count',
                     'Fleg_Pallets': 'sum',
                     'Sec_Pallets': 'sum',
                     'Total_PLT': 'sum',
-                    'Base_Price': 'max'
+                    'Base_Price': 'max' # Furthest point price
                 }).reset_index()
 
-                def calc_costs(row):
-                    stops = row['Store_Name'] - 1
-                    fee = EXTRA_FLEG if row['Main_Activity'] == "Fleg" else EXTRA_SEC
-                    return row['Base_Price'] + (stops * fee if stops > 0 else 0)
+                def calculate_final_costs(row):
+                    extra_stops = row['Store_Name'] - 1
+                    stop_fee = EXTRA_STOP_FLEG if row['Calc_Activity'] == "Fleg" else EXTRA_STOP_SEC
+                    return row['Base_Price'] + (extra_stops * stop_fee if extra_stops > 0 else 0)
 
-                route_summary['Final_Cost'] = route_summary.apply(calc_costs, axis=1)
+                route_summary['Final_Cost'] = route_summary.apply(calculate_final_costs, axis=1)
 
-                # --- DISPLAY ---
-                st.subheader(f"📊 Delivery Plan: {selected_wave}")
+                # --- RESULTS DISPLAY ---
+                st.subheader(f"📊 Live Optimized Plan: {selected_wave}")
                 
-                # Alerts
+                # Dynamic Constraint Alerts
                 for _, row in df_wave.iterrows():
                     if row['Truck_Type'] == '19T':
-                        st.warning(f"🚨 **19T Only:** {row['Store_Name']} ({row['City']})")
+                        st.warning(f"🚨 **Constraint Alert:** {row['Store_Name']} ({row['City']}) restricted to 19T.")
 
-                st.write("### 📝 Manifest")
+                st.write("### 📝 Detailed Loading List")
                 st.dataframe(df_wave[['Store_Code', 'Store_Name', 'City', 'Fleg_Pallets', 'Sec_Pallets', 'Total_PLT', 'Truck_Type', 'Receiving Window']])
 
                 st.divider()
-                st.write("### 💰 Financials")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Total Pallets", f"{df_wave['Total_PLT'].sum()} PLT")
-                c2.metric("Total Cost", f"{route_summary['Final_Cost'].sum():,.2f} MAD")
-                c3.metric("Stops", len(df_wave))
+                st.write("### 💰 Financial Summary")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Volume", f"{df_wave['Total_PLT'].sum()} PLT")
+                col2.metric("Total Transportation Cost", f"{route_summary['Final_Cost'].sum():,.2f} MAD")
+                col3.metric("Number of Drops", len(df_wave))
 
-                st.write("#### 🚚 Optimized Routes")
-                st.table(route_summary.rename(columns={'Store_Name': 'Drops', 'Base_Price': 'Base Tariff', 'Final_Cost': 'Total Cost'}))
+                st.write("#### 🚚 Consolidation Report (Route Grouping)")
+                st.table(route_summary.rename(columns={
+                    'Store_Name': 'Drops', 
+                    'Base_Price': 'Base Tariff', 
+                    'Final_Cost': 'Total Cost'
+                }))
 
         except Exception as e:
-            st.error(f"Logic Error: {e}")
+            st.error(f"Logic Processing Error: {e}")
 
-st.caption("LABDIS v5.0 - Robust Encoding & Multi-Product Logic")
+st.caption("LABDIS v6.0 | Bulletproof Encoding | Multi-Product Logic | Route Optimization")
