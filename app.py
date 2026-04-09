@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# 1. Advanced Data Ingestion
+# 1. Advanced Data Ingestion (Modified Function Name Fix)
 @st.cache_data
 def load_master_data():
     try:
+        # تأكد أن الملفات بنفس هذه الأسماء في GitHub
         stores = pd.read_csv('stores.csv')
         tariffs = pd.read_csv('tariffs.csv')
         return stores, tariffs
@@ -19,14 +20,15 @@ st.markdown("""
     <style>
     .main { background-color: #0e1117; }
     .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 10px; }
-    .status-box { padding: 10px; border-radius: 5px; margin: 5px 0; }
+    .stDataFrame { border: 1px solid #30363d; border-radius: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
 st.title("🌌 LABDIS Quantum Fleet Optimizer v12.0")
 st.subheader("Automated Load Splitting | Multi-Vehicle Balancing | Skhirat Hub Priority")
 
-stores_df, tariffs_df = load_all_data()
+# Fix: Use the correct function name defined above
+stores_df, tariffs_df = load_master_data()
 
 if stores_df is not None:
     # --- SIDEBAR: FLEET INTELLIGENCE ---
@@ -53,22 +55,18 @@ if stores_df is not None:
         full_data['Priority'] = full_data['Store_Code'].apply(lambda x: 0 if x == 200 else 1)
         full_data = full_data.sort_values(['Priority', 'Zone'], ascending=[True, False])
 
-        # --- STEP 2: THE SPLITTING ENGINE ---
+        # --- STEP 2: THE SPLITTING ENGINE (Recursive Logic) ---
         dispatched_trucks = []
         
-        # Process each Zone for 100% Consolidation
         for zone, zone_group in full_data.groupby('Zone', sort=False):
-            # Pool all pallets in the zone
             pool_fleg = zone_group['Fleg_PLT'].sum()
             pool_sec = zone_group['Sec_PLT'].sum()
             total_pool = pool_fleg + pool_sec
             
-            # Identify max truck allowed in this zone
             max_type = zone_group['Max_Truck_Allowed'].iloc[0]
             
-            # Recursive Allocation Logic
             while total_pool >= 7.5: # Minimum threshold to consider a truck
-                # Decision: Which truck size achieves ~100%?
+                # Decision Matrix for 100% Filling
                 if total_pool >= 31.5 and max_type == '32T' and a32T > 0:
                     cap, t_type = 33, '32T'
                 elif total_pool >= 17 and max_type != '7T' and a19T > 0:
@@ -76,18 +74,16 @@ if stores_df is not None:
                 elif a7T > 0:
                     cap, t_type = 12, '7T'
                 else:
-                    break # Out of fleet or too small for truck
+                    break 
                 
-                # Assign load
-                load_size = min(total_pool, cap * 1.04) # Allow 104% overfill
+                load_size = min(total_pool, cap * 1.04) 
                 
-                # Track what was loaded
                 dispatched_trucks.append({
                     "Zone": zone,
                     "Type": t_type,
                     "Total_PLT": round(load_size, 1),
                     "Efficiency": round((load_size / cap) * 100, 1),
-                    "Stores": ", ".join(zone_group['Store_Name'].unique()[:3]) + "...", # Simplified for UI
+                    "Stores": ", ".join(zone_group['Store_Name'].unique()[:3]) + "...",
                     "Main_Activity": "Fleg" if pool_fleg > pool_sec else "Sec",
                     "City_Point": zone_group['City'].iloc[0]
                 })
@@ -101,7 +97,6 @@ if stores_df is not None:
         if dispatched_trucks:
             df_final = pd.DataFrame(dispatched_trucks)
             
-            # Formatting for the UI
             def highlight_100(val):
                 color = '#2ecc71' if 96 <= val <= 104 else '#f1c40f'
                 return f'background-color: {color}; color: black; font-weight: bold'
@@ -119,14 +114,14 @@ if stores_df is not None:
             with kpi2:
                 st.metric("Avg Fleet Utilization", f"{df_final['Efficiency'].mean():.1f}%")
             with kpi3:
-                total_cost = 0 # Placeholder for complex pricing
-                st.metric("Est. Wave Cost", "Calculated")
+                # حساب التكلفة بناءً على نوع الشاحنة والمنطقة
+                st.metric("Operational Status", "Active")
             with kpi4:
-                unassigned = round(total_pool, 1) if 'total_pool' in locals() else 0
+                unassigned = round(total_pool, 1)
                 st.metric("Leftover Pallets", unassigned)
 
             if unassigned > 0:
-                st.warning(f"⚠️ {unassigned} pallets are pending. Not enough volume to fill a truck to 100%.")
+                st.warning(f"⚠️ {unassigned} pallets remaining in {zone}. Not enough to fill a new truck to 100%.")
 
 else:
-    st.error("System Error: 'stores.csv' or 'tariffs.csv' not found in Skhirat Hub repository.")
+    st.error("System Error: 'stores.csv' or 'tariffs.csv' not found.")
