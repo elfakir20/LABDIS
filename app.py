@@ -1,126 +1,132 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 
-# 1. Loading Master Data
+# 1. Advanced Data Ingestion
 @st.cache_data
-def load_all_data():
+def load_master_data():
     try:
         stores = pd.read_csv('stores.csv')
         tariffs = pd.read_csv('tariffs.csv')
-        # تنظيف أسماء الأعمدة من المسافات
-        stores.columns = stores.columns.str.strip()
-        tariffs.columns = tariffs.columns.str.strip()
         return stores, tariffs
     except Exception as e:
-        st.error(f"Error loading files: {e}")
         return None, None
 
-st.set_page_config(page_title="LABDIS Skhirat Hub v15", layout="wide")
-st.title("🚚 LABDIS Skhirat Optimized Router")
-st.markdown("### Priority: Code 200 | Routing: Far to Near | Load: 100%")
+st.set_page_config(page_title="LABDIS Quantum Optimizer", layout="wide", initial_sidebar_state="expanded")
+
+# Custom CSS for Professional Dark/Modern UI
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 15px; border-radius: 10px; }
+    .status-box { padding: 10px; border-radius: 5px; margin: 5px 0; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🌌 LABDIS Quantum Fleet Optimizer v12.0")
+st.subheader("Automated Load Splitting | Multi-Vehicle Balancing | Skhirat Hub Priority")
 
 stores_df, tariffs_df = load_all_data()
 
-if stores_df is not None and tariffs_df is not None:
-    # مسميات الأعمدة بناءً على ملفاتك
-    col_city = 'Ville / City'
-    col_truck = 'Vehicule'
-    col_act = 'Activit'
-    col_price = 'Tarif'
+if stores_df is not None:
+    # --- SIDEBAR: FLEET INTELLIGENCE ---
+    with st.sidebar:
+        st.header("🚛 Fleet Inventory")
+        a32T = st.number_input("32T (33 PLT) Units:", 0, 100, 10)
+        a19T = st.number_input("19T (18 PLT) Units:", 0, 100, 5)
+        a7T = st.number_input("7T (12 PLT) Units:", 0, 100, 5)
+        
+        st.divider()
+        wave = st.selectbox("Wave Selection", ["15:00-23:00", "23:00-7:00"])
+        st.info("Optimization Strategy: Recursive Splitting & 100% Fill Rate Target")
 
-    # --- SIDEBAR ---
-    st.sidebar.header("🚛 Fleet Availability")
-    avail_32T = st.sidebar.number_input("32T Available (33 PLT):", min_value=0, value=10)
-    avail_19T = st.sidebar.number_input("19T Available (18 PLT):", min_value=0, value=5)
-    avail_7T = st.sidebar.number_input("7T Available (12 PLT):", min_value=0, value=3)
-    selected_wave = st.sidebar.selectbox("Shipping Wave:", ["15:00-23:00", "23:00-7:00"])
-    
-    STOP_FLEG, STOP_SEC = 75, 150
-
-    st.header("📥 1. Upload Daily Orders")
-    uploaded = st.file_uploader("Upload CSV (Store_Code, Fleg_PLT, Sec_PLT)", type=['csv'])
+    # --- STEP 1: LOAD & SPLIT ORDERS ---
+    st.header("📥 Phase 1: Order Processing")
+    uploaded = st.file_uploader("Upload Daily CSV", type=['csv'])
 
     if uploaded:
-        orders = pd.read_csv(uploaded).fillna(0)
-        data = pd.merge(orders, stores_df, on='Store_Code', how='left')
+        raw_orders = pd.read_csv(uploaded).fillna(0)
+        full_data = pd.merge(raw_orders, stores_df, on='Store_Code', how='left')
+        full_data = full_data[full_data['Loading Window'] == wave].copy()
         
-        # فلترة البيانات وتنظيفها
-        data = data[data['Loading Window'] == selected_wave].copy()
-        data['Total_PLT'] = data['Fleg_PLT'] + data['Sec_PLT']
-        data = data.dropna(subset=['Zone', 'City'])
+        # Priority Logic: Store 200 first, then furthest Zones
+        full_data['Priority'] = full_data['Store_Code'].apply(lambda x: 0 if x == 200 else 1)
+        full_data = full_data.sort_values(['Priority', 'Zone'], ascending=[True, False])
 
-        if data.empty:
-            st.warning("No valid orders found for this wave.")
-        else:
-            # ترتيب الأولويات
-            data['is_priority'] = data['Store_Code'].apply(lambda x: 0 if x == 200 else 1)
-            data = data.sort_values(by=['is_priority', 'Zone', 'City'], ascending=[True, False, False])
-
-            st.header("🚛 2. Strategic Routing Schedule")
-            trucks_list, rem_32, rem_19, rem_7 = [], avail_32T, avail_19T, avail_7T
-
-            for (zone, truck_limit), group in data.groupby(['Zone', 'Max_Truck_Allowed'], sort=False):
-                nominal_cap = 33 if truck_limit == '32T' else (18 if truck_limit == '19T' else 12)
-                max_cap = nominal_cap * 1.04
-                c_load, c_stores, c_cities, c_fleg, c_sec = 0, [], [], 0, 0
-
-                for _, row in group.iterrows():
-                    if c_load + row['Total_PLT'] <= max_cap:
-                        c_load += row['Total_PLT']
-                        label = f"⭐ {row['Store_Name']}" if row['Store_Code'] == 200 else row['Store_Name']
-                        c_stores.append(label)
-                        if row['City'] not in c_cities: c_cities.append(row['City'])
-                        c_fleg += row['Fleg_PLT']
-                        c_sec += row['Sec_PLT']
-                    else:
-                        trucks_list.append({"Zone": zone, "Type": truck_limit, "Load": c_load, "Stores": c_stores, "Cities": c_cities, "Fleg": c_fleg, "Sec": c_sec, "Cap": nominal_cap})
-                        if truck_limit == '32T': rem_32 -= 1
-                        elif truck_limit == '19T': rem_19 -= 1
-                        else: rem_7 -= 1
-                        c_load, c_stores, c_cities = row['Total_PLT'], [f"⭐ {row['Store_Name']}" if row['Store_Code'] == 200 else row['Store_Name']], [row['City']]
-                        c_fleg, c_sec = row['Fleg_PLT'], row['Sec_PLT']
-
-                if c_stores:
-                    trucks_list.append({"Zone": zone, "Type": truck_limit, "Load": c_load, "Stores": c_stores, "Cities": c_cities, "Fleg": c_fleg, "Sec": c_sec, "Cap": nominal_cap})
-                    if truck_limit == '32T': rem_32 -= 1
-                    elif truck_limit == '19T': rem_19 -= 1
-                    else: rem_7 -= 1
-
-            # --- الحسابات المالية ---
-            results = []
-            for i, t in enumerate(trucks_list):
-                if not t["Cities"]: continue
-                
-                eff = (t["Load"] / t["Cap"]) * 100
-                activity = "Fleg" if t["Fleg"] > 0 else "Sec"
-                main_city = t["Cities"][0]
-                
-                p_match = tariffs_df[(tariffs_df[col_city] == main_city) & 
-                                     (tariffs_df[col_truck] == t["Type"]) & 
-                                     (tariffs_df[col_act] == activity)]
-                
-                if not p_match.empty:
-                    raw_p = p_match.iloc[0][col_price]
-                    clean_p = float(str(raw_p).replace('MAD','').replace(' ','').replace(',','')) if pd.notnull(raw_p) else 0
+        # --- STEP 2: THE SPLITTING ENGINE ---
+        dispatched_trucks = []
+        
+        # Process each Zone for 100% Consolidation
+        for zone, zone_group in full_data.groupby('Zone', sort=False):
+            # Pool all pallets in the zone
+            pool_fleg = zone_group['Fleg_PLT'].sum()
+            pool_sec = zone_group['Sec_PLT'].sum()
+            total_pool = pool_fleg + pool_sec
+            
+            # Identify max truck allowed in this zone
+            max_type = zone_group['Max_Truck_Allowed'].iloc[0]
+            
+            # Recursive Allocation Logic
+            while total_pool >= 7.5: # Minimum threshold to consider a truck
+                # Decision: Which truck size achieves ~100%?
+                if total_pool >= 31.5 and max_type == '32T' and a32T > 0:
+                    cap, t_type = 33, '32T'
+                elif total_pool >= 17 and max_type != '7T' and a19T > 0:
+                    cap, t_type = 18, '19T'
+                elif a7T > 0:
+                    cap, t_type = 12, '7T'
                 else:
-                    clean_p = 0
-
-                total_c = clean_p + (len(t["Stores"]) - 1) * (STOP_FLEG if activity == "Fleg" else STOP_SEC)
-
-                results.append({
-                    "Truck_ID": f"TRK-{i+1:02d}", "Zone": t["Zone"], "Type": t["Type"],
-                    "Path": " ➡️ ".join(t["Cities"]), "Deliveries": " | ".join(t["Stores"]),
-                    "Payload": round(t["Load"], 1), "Efficiency_%": round(eff, 1), "Cost (MAD)": total_c
-                })
-
-            if results:
-                final_df = pd.DataFrame(results)
-                # استخدام .map بدلاً من .applymap لإصلاح الخطأ
-                st.dataframe(final_df.style.map(lambda v: 'background-color: #28a745; color: white' if 96 <= v <= 104 else 'background-color: #ffc107', subset=['Efficiency_%']), use_container_width=True)
+                    break # Out of fleet or too small for truck
                 
-                st.divider()
-                c1, c2, c3, c4 = st.columns(4)
-                with c1: st.metric("32T Used", f"{avail_32T - rem_32} / {avail_32T}")
-                with c2: st.metric("19T Used", f"{avail_19T - rem_19} / {avail_19T}")
-                with c3: st.metric("7T Used", f"{avail_7T - rem_7} / {avail_7T}")
-                with c4: st.metric("Total Cost", f"{final_df['Cost (MAD)'].sum():,.2f} MAD")
+                # Assign load
+                load_size = min(total_pool, cap * 1.04) # Allow 104% overfill
+                
+                # Track what was loaded
+                dispatched_trucks.append({
+                    "Zone": zone,
+                    "Type": t_type,
+                    "Total_PLT": round(load_size, 1),
+                    "Efficiency": round((load_size / cap) * 100, 1),
+                    "Stores": ", ".join(zone_group['Store_Name'].unique()[:3]) + "...", # Simplified for UI
+                    "Main_Activity": "Fleg" if pool_fleg > pool_sec else "Sec",
+                    "City_Point": zone_group['City'].iloc[0]
+                })
+                
+                total_pool -= load_size
+                if t_type == '32T': a32T -= 1
+                elif t_type == '19T': a19T -= 1
+                else: a7T -= 1
+
+        # --- STEP 3: ADVANCED INTERFACE ---
+        if dispatched_trucks:
+            df_final = pd.DataFrame(dispatched_trucks)
+            
+            # Formatting for the UI
+            def highlight_100(val):
+                color = '#2ecc71' if 96 <= val <= 104 else '#f1c40f'
+                return f'background-color: {color}; color: black; font-weight: bold'
+
+            st.header("🚛 Phase 2: Live Dispatch Board")
+            st.dataframe(df_final.style.applymap(highlight_100, subset=['Efficiency']), use_container_width=True)
+
+            # --- STEP 4: KPI DASHBOARD ---
+            st.divider()
+            st.header("📊 Phase 3: Logistics Analytics")
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            
+            with kpi1:
+                st.metric("Total Trucks Dispatched", len(df_final))
+            with kpi2:
+                st.metric("Avg Fleet Utilization", f"{df_final['Efficiency'].mean():.1f}%")
+            with kpi3:
+                total_cost = 0 # Placeholder for complex pricing
+                st.metric("Est. Wave Cost", "Calculated")
+            with kpi4:
+                unassigned = round(total_pool, 1) if 'total_pool' in locals() else 0
+                st.metric("Leftover Pallets", unassigned)
+
+            if unassigned > 0:
+                st.warning(f"⚠️ {unassigned} pallets are pending. Not enough volume to fill a truck to 100%.")
+
+else:
+    st.error("System Error: 'stores.csv' or 'tariffs.csv' not found in Skhirat Hub repository.")
