@@ -401,6 +401,11 @@ def bin_pack_into_trucks(
         return
 
     open_bins: List[List[StoreOrder]] = []
+  def render_map(df):
+    # تفترض هذه الدالة وجود إحداثيات (Lat/Lon) في ملف المتاجر
+    if 'lat' in df.columns and 'lon' in df.columns:
+        st.subheader("📍 Map View")
+        st.map(df)
 
     # Sort stores: priority store first, then largest first
     store_orders_sorted = sorted(
