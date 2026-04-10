@@ -3,225 +3,132 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+import io
 
-# ================= CONFIG =================
+# ================= CONFIGURATION =================
 
-TRUCK_CAPACITY = {"32T": 33, "19T": 18, "7T": 12}
-PRIORITY_STORE = "200"
+TRUCK_CAPACITY_32T = 33
+PRIORITY_STORE_CODE = "200"
 
-# ================= LOADERS =================
+# ================= DATA LOADERS =================
 
-def load_stores(file):
-    df = pd.read_csv(file)
-    df.columns = df.columns.str.strip()
-    df["Store_Code"] = df["Store_Code"].astype(str)
-    return df
-
-def load_orders(file):
-    df = pd.read_csv(file)
-    df.columns = df.columns.str.strip()
-    df["Store_Code"] = df["Store_Code"].astype(str)
-    df["Fleg_PLT"] = df["Fleg_PLT"].fillna(0).astype(int)
-    df["Sec_PLT"] = df["Sec_PLT"].fillna(0).astype(int)
-    df["Total_PLT"] = df["Fleg_PLT"] + df["Sec_PLT"]
-    return df
-
-def load_tariffs(file):
-    df = pd.read_csv(file)
-    df.columns = df.columns.str.strip()
-    return df
+def load_data(stores_file, orders_file):
+    try:
+        df_s = pd.read_csv(stores_file).applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        df_o = pd.read_csv(orders_file).applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        
+        df_s["Store_Code"] = df_s["Store_Code"].astype(str)
+        df_o["Store_Code"] = df_o["Store_Code"].astype(str)
+        
+        merged = df_o.merge(df_s, on="Store_Code", how="left")
+        merged["Total_PLT"] = pd.to_numeric(merged["Fleg_PLT"], errors='coerce').fillna(0) + \
+                              pd.to_numeric(merged["Sec_PLT"], errors='coerce').fillna(0)
+        return merged
+    except Exception as e:
+        st.error(f"Error loading CSV files: {e}")
+        return None
 
 # ================= OR-TOOLS CORE =================
 
-def create_data_model(df):
+def solve_logistics_vrp(df):
+    # 1. Prepare Data Model
+    # We add a dummy Depot at index 0
+    demands = [0] + df["Total_PLT"].tolist()
+    num_locations = len(demands)
+    num_vehicles = max(5, len(df) // 2) # Adaptive fleet size
+    vehicle_capacities = [TRUCK_CAPACITY_32T] * num_vehicles
+    
+    # 2. Distance Matrix (Heuristic based on Zones)
+    # 0 is Depot. 1..N are stores.
+    dist_matrix = np.zeros((num_locations, num_locations))
+    for i in range(num_locations):
+        for j in range(num_locations):
+            if i == 0 or j == 0:
+                dist_matrix[i][j] = 20 # Distance from Depot
+            else:
+                # Same zone = low cost, different zone = high cost
+                z1 = df.iloc[i-1]["Zone"]
+                z2 = df.iloc[j-1]["Zone"]
+                dist_matrix[i][j] = 5 if z1 == z2 else 40
 
-    df = df.reset_index(drop=True)
-
-    data = {}
-
-    # DEMAND
-    data["demands"] = df["Total_PLT"].tolist()
-
-    n = len(df)
-
-    # SAFE CHECK
-    if n == 0:
-        return None
-
-    # Distance matrix (zone heuristic)
-    matrix = np.zeros((n, n))
-
-    for i in range(n):
-        for j in range(n):
-            matrix[i][j] = 10 if df.iloc[i]["Zone"] == df.iloc[j]["Zone"] else 50
-
-    data["distance_matrix"] = matrix.tolist()
-
-    # 🚛 FIX: realistic fleet size
-    data["num_vehicles"] = min(10, n)
-    data["vehicle_capacities"] = [33] * data["num_vehicles"]
-
-    data["depot"] = 0
-
-    return data
-
-
-def solve_vrp(data):
-
-    if data is None:
-        return None, None, None
-
-    manager = pywrapcp.RoutingIndexManager(
-        len(data["distance_matrix"]),
-        data["num_vehicles"],
-        data["depot"]
-    )
-
+    # 3. Initialize OR-Tools
+    manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, 0)
     routing = pywrapcp.RoutingModel(manager)
 
-    # COST
-    def distance_callback(from_index, to_index):
-        return int(
-            data["distance_matrix"]
-            [manager.IndexToNode(from_index)]
-            [manager.IndexToNode(to_index)]
-        )
+    # Cost Function
+    def distance_callback(from_idx, to_idx):
+        return int(dist_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)])
 
-    transit_index = routing.RegisterTransitCallback(distance_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-    # DEMAND
-    def demand_callback(from_index):
-        return int(data["demands"][manager.IndexToNode(from_index)])
+    # Demand Function
+    def demand_callback(from_idx):
+        return int(demands[manager.IndexToNode(from_idx)])
 
-    demand_index = routing.RegisterUnaryTransitCallback(demand_callback)
-
+    demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
     routing.AddDimensionWithVehicleCapacity(
-        demand_index,
-        0,
-        data["vehicle_capacities"],
-        True,
-        "Capacity"
+        demand_callback_index, 0, vehicle_capacities, True, "Capacity"
     )
 
-    # SOLVER
-    params = pywrapcp.DefaultRoutingSearchParameters()
-    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    params.time_limit.FromSeconds(3)
+    # 4. Search Parameters
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    search_parameters.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
+    search_parameters.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    )
+    search_parameters.time_limit.FromSeconds(2)
 
-    solution = routing.SolveWithParameters(params)
-
+    # 5. Solve
+    solution = routing.SolveWithParameters(search_parameters)
     return solution, routing, manager
 
-
-def extract_routes(df, solution, routing, manager):
-
-    if solution is None:
-        return []
-
-    routes = []
-
-    for v in range(routing.vehicles()):
-        index = routing.Start(v)
-        route = []
-        load = 0
-
-        while not routing.IsEnd(index):
-            node = manager.IndexToNode(index)
-
-            if node < len(df):
-                route.append(node)
-                load += df.iloc[node]["Total_PLT"]
-
-            index = solution.Value(routing.NextVar(index))
-
-        if route:
-            routes.append({
-                "Truck": v,
-                "Stops": len(route),
-                "Load": load
-            })
-
-    return routes
-
-# ================= STREAMLIT =================
+# ================= UI & EXECUTION =================
 
 def main():
+    st.set_page_config(page_title="Skhirat Hub PRO", layout="wide")
+    st.title("🚛 Skhirat Hub — Advanced OR-Tools Engine")
+    st.markdown("---")
 
-    st.set_page_config(page_title="Skhirat TMS PRO", layout="wide")
+    # Sidebar
+    st.sidebar.header("📁 Upload Center")
+    s_file = st.sidebar.file_uploader("Stores Database", type="csv")
+    o_file = st.sidebar.file_uploader("Daily Orders", type="csv")
+    
+    if s_file and o_file:
+        df = load_data(s_file, o_file)
+        
+        if df is not None:
+            # Sort by Priority Store if exists
+            priority_mask = df["Store_Code"] == PRIORITY_STORE_CODE
+            df = pd.concat([df[priority_mask], df[~priority_mask]]).reset_index(drop=True)
 
-    st.title("🚛 Skhirat Hub — PRO OR-Tools Engine")
+            st.subheader("📦 Merged Shipment Data")
+            st.dataframe(df.head(10), use_container_width=True)
 
-    # Upload
-    st.sidebar.header("📂 Data")
-
-    stores_file = st.sidebar.file_uploader("Stores")
-    orders_file = st.sidebar.file_uploader("Orders")
-    tariffs_file = st.sidebar.file_uploader("Tariffs")
-
-    if not (stores_file and orders_file and tariffs_file):
-        st.warning("Upload all files")
-        return
-
-    # LOAD
-    stores = load_stores(stores_file)
-    orders = load_orders(orders_file)
-
-    merged = orders.merge(stores, on="Store_Code", how="left")
-
-    # PRIORITY STORE
-    merged = pd.concat([
-        merged[merged["Store_Code"] == PRIORITY_STORE],
-        merged[merged["Store_Code"] != PRIORITY_STORE]
-    ])
-
-    st.subheader("📦 Data Preview")
-    st.dataframe(merged)
-
-    # SAFETY CHECK
-    if len(merged) == 0:
-        st.error("No data after merge")
-        return
-
-    # OPTIMIZATION
-    st.subheader("⚙️ Running OR-Tools Optimization...")
-
-    try:
-        data_model = create_data_model(merged)
-        solution, routing, manager = solve_vrp(data_model)
-
-        if solution is None:
-            st.error("❌ No feasible solution found")
-            return
-
-        routes = extract_routes(merged, solution, routing, manager)
-
-    except Exception as e:
-        st.error(f"Optimization error: {e}")
-        return
-
-    df_routes = pd.DataFrame(routes)
-
-    # KPIs
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric("🚛 Trucks", len(df_routes))
-    c2.metric("📦 Load", int(df_routes["Load"].sum()) if not df_routes.empty else 0)
-    c3.metric("📍 Avg Stops", round(df_routes["Stops"].mean(), 2) if not df_routes.empty else 0)
-
-    # TABLE
-    st.subheader("📋 Routes")
-    st.dataframe(df_routes)
-
-    # CHART
-    if not df_routes.empty:
-        fig = px.bar(df_routes, x="Truck", y="Load", title="Truck Utilization")
-        st.plotly_chart(fig)
-
-    st.success("✅ Production OR-Tools Optimization Complete")
-
-# ================= RUN =================
-
-if __name__ == "__main__":
-    main()
+            if st.button("🚀 Run OR-Tools Optimization"):
+                with st.spinner("Calculating optimal routes..."):
+                    sol, rot, mgr = solve_logistics_vrp(df)
+                    
+                    if sol:
+                        output_routes = []
+                        for v in range(rot.vehicles()):
+                            idx = rot.Start(v)
+                            route_nodes = []
+                            route_load = 0
+                            while not rot.IsEnd(idx):
+                                node = mgr.IndexToNode(idx)
+                                if node != 0: # Skip Depot
+                                    store = df.iloc[node-1]
+                                    route_nodes.append(f"{store['Store_Name']} ({store['Total_PLT']} PLT)")
+                                    route_load += demands = store['Total_PLT']
+                                idx = sol.Value(rot.NextVar(idx))
+                            
+                            if route_nodes:
+                                output_routes.append({
+                                    "Truck_ID": f"T-{v+1:02d}",
+                                    "Stops_Count": len(route_nodes),
+                                    "Total_Load": route_load,
+                                    "Utilization": f"{(route_load
