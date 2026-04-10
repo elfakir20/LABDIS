@@ -5,133 +5,141 @@ import plotly.express as px
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 import io
 
-# ================= CONFIGURATION =================
-TRUCK_CAPACITY_LIMIT = 33
-DEFAULT_DEPOT_INDEX = 0
+# ================= 1. CONFIGURATION =================
+# Standard pallet capacity for a 32T truck
+MAX_PALLETS = 33 
 
-# ================= HELPER FUNCTIONS =================
-def load_and_merge(s_file, o_file):
+# ================= 2. CORE FUNCTIONS =================
+
+def load_data(s_file, o_file):
+    """Loads and cleans the store and order data."""
     try:
-        df_s = pd.read_csv(s_file)
-        df_o = pd.read_csv(o_file)
+        df_s = pd.read_csv(s_file).applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        df_o = pd.read_csv(o_file).applymap(lambda x: x.strip() if isinstance(x, str) else x)
         
-        # Clean column names and types
-        df_s.columns = df_s.columns.str.strip()
-        df_o.columns = df_o.columns.str.strip()
-        df_s["Store_Code"] = df_s["Store_Code"].astype(str).str.strip()
-        df_o["Store_Code"] = df_o["Store_Code"].astype(str).str.strip()
+        # Ensure Store_Code is string for matching
+        df_s["Store_Code"] = df_s["Store_Code"].astype(str)
+        df_o["Store_Code"] = df_o["Store_Code"].astype(str)
         
         merged = df_o.merge(df_s, on="Store_Code", how="left")
+        
+        # Calculate Total Pallets
         merged["Total_PLT"] = pd.to_numeric(merged["Fleg_PLT"], errors='coerce').fillna(0) + \
                               pd.to_numeric(merged["Sec_PLT"], errors='coerce').fillna(0)
-        return merged.fillna("Unknown")
+        
+        return merged.dropna(subset=["Store_Name", "Zone"])
     except Exception as e:
-        st.error(f"Data Loading Error: {e}")
+        st.error(f"Data processing error: {e}")
         return None
 
-# ================= OR-TOOLS ENGINE =================
-def solve_routing(df):
-    # Demands: 0 for Depot, then store pallets
-    demands = [0] + df["Total_PLT"].tolist()
+def solve_vrp(df):
+    """OR-Tools VRP Solver logic."""
+    # Data preprocessing for OR-Tools
+    demands = [0] + df["Total_PLT"].tolist() # 0 is for Depot (Skhirat)
     num_locations = len(demands)
-    num_vehicles = max(10, len(df) // 2 + 2)  # Dynamic fleet size
-    capacities = [TRUCK_CAPACITY_LIMIT] * num_vehicles
-
-    # Distance Matrix (Heuristic based on Zones)
-    # i, j = 0 is Skhirat Depot
+    num_vehicles = max(15, len(df)) # High fleet limit to ensure feasibility
+    vehicle_capacities = [MAX_PALLETS] * num_vehicles
+    
+    # Distance Matrix Heuristic (Zone-based)
     dist_matrix = np.zeros((num_locations, num_locations))
     for i in range(num_locations):
         for j in range(num_locations):
-            if i == j: dist_matrix[i][j] = 0
-            elif i == 0 or j == 0: dist_matrix[i][j] = 30 # Base distance to Depot
+            if i == 0 or j == 0:
+                dist_matrix[i][j] = 25 # Average distance to Depot
             else:
-                # Stores in same zone are "closer"
-                z1 = df.iloc[i-1]["Zone"]
-                z2 = df.iloc[j-1]["Zone"]
-                dist_matrix[i][j] = 5 if z1 == z2 else 50
+                z1, z2 = df.iloc[i-1]["Zone"], df.iloc[j-1]["Zone"]
+                dist_matrix[i][j] = 5 if z1 == z2 else 45 # Penalty for changing zones
 
-    # Initialize Manager and Model
-    manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, DEFAULT_DEPOT_INDEX)
+    # Initialize Routing Model
+    manager = pywrapcp.RoutingIndexManager(num_locations, num_vehicles, 0)
     routing = pywrapcp.RoutingModel(manager)
 
+    # Arc Cost
     def distance_callback(from_idx, to_idx):
         return int(dist_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)])
-
+    
     transit_idx = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
 
+    # Capacity Constraints
     def demand_callback(from_idx):
         return int(demands[manager.IndexToNode(from_idx)])
-
+    
     demand_idx = routing.RegisterUnaryTransitCallback(demand_callback)
-    routing.AddDimensionWithVehicleCapacity(demand_idx, 0, capacities, True, "Capacity")
+    routing.AddDimensionWithVehicleCapacity(demand_idx, 0, vehicle_capacities, True, "Capacity")
 
     # Parameters
-    params = pywrapcp.DefaultRoutingSearchParameters()
-    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    params.time_limit.FromSeconds(3)
+    search_params = pywrapcp.DefaultRoutingSearchParameters()
+    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    search_params.time_limit.FromSeconds(2) # Fast limit for UI responsiveness
 
-    return routing.SolveWithParameters(params), routing, manager, demands
+    solution = routing.SolveWithParameters(search_params)
+    return solution, routing, manager
 
-# ================= STREAMLIT UI =================
+# ================= 3. STREAMLIT UI =================
+
 def main():
-    st.set_page_config(page_title="Skhirat PRO TMS", layout="wide")
-    st.title("🚛 Skhirat Hub — Optimization Engine (OR-Tools)")
-    st.info("Status: Operational | Engine: Google OR-Tools")
+    st.set_page_config(page_title="Skhirat TMS PRO", layout="wide")
+    
+    st.title("🚛 Skhirat Hub — Optimization Engine")
+    st.markdown("---")
 
-    st.sidebar.header("Upload Files")
-    s_file = st.sidebar.file_uploader("1. Stores Database", type="csv")
-    o_file = st.sidebar.file_uploader("2. Daily Orders", type="csv")
-
+    with st.sidebar:
+        st.header("📂 Data Import")
+        s_file = st.file_uploader("Stores Master (CSV)", type="csv")
+        o_file = st.file_uploader("Daily Orders (CSV)", type="csv")
+        
     if s_file and o_file:
-        df = load_and_merge(s_file, o_file)
-        if df is not None:
-            st.success(f"Loaded {len(df)} orders successfully.")
+        df = load_data(s_file, o_file)
+        
+        if df is not None and not df.empty:
+            st.success(f"Linked {len(df)} orders to store database.")
             
-            if st.button("🚀 Optimize Delivery Plan"):
-                solution, routing, manager, demands = solve_routing(df)
-                
-                if solution:
-                    results = []
-                    for vehicle_id in range(routing.vehicles()):
-                        index = routing.Start(vehicle_id)
-                        plan_output = []
-                        route_load = 0
-                        while not routing.IsEnd(index):
-                            node_index = manager.IndexToNode(index)
-                            if node_index != 0:
-                                store_data = df.iloc[node_index-1]
-                                plan_output.append(f"{store_data['Store_Name']}")
-                                route_load += demands[node_index]
-                            index = solution.Value(routing.NextVar(index))
+            if st.button("🚀 Calculate Optimized Routes"):
+                with st.spinner("Analyzing constraints..."):
+                    sol, rot, mgr = solve_vrp(df)
+                    
+                    if sol:
+                        route_data = []
+                        for v in range(rot.vehicles()):
+                            idx = rot.Start(v)
+                            manifest = []
+                            load = 0
+                            while not rot.IsEnd(idx):
+                                node = mgr.IndexToNode(idx)
+                                if node != 0:
+                                    row = df.iloc[node-1]
+                                    manifest.append(f"{row['Store_Name']} ({int(row['Total_PLT'])}P)")
+                                    load += row['Total_PLT']
+                                idx = sol.Value(rot.NextVar(idx))
+                            
+                            if manifest:
+                                route_data.append({
+                                    "Truck": f"Truck {v+1}",
+                                    "Stops": len(manifest),
+                                    "Load": int(load),
+                                    "Utilization (%)": round((load/MAX_PALLETS)*100, 1),
+                                    "Manifest": " ➔ ".join(manifest)
+                                })
                         
-                        if plan_output:
-                            results.append({
-                                "Truck": f"Truck {vehicle_id + 1}",
-                                "Stops": len(plan_output),
-                                "Load (PLT)": route_load,
-                                "Utilization": f"{(route_load/33)*100:.1f}%",
-                                "Route Sequence": " ➔ ".join(plan_output)
-                            })
-                    
-                    res_df = pd.DataFrame(results)
-                    
-                    # Dashboard
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Total Trucks Used", len(res_df))
-                    m2.metric("Total Pallets", int(res_df["Load (PLT)"].sum()))
-                    m3.metric("Avg Load/Truck", f"{res_df['Load (PLT)'].mean():.1f}")
-
-                    st.subheader("📋 Optimized Load Manifest")
-                    st.dataframe(res_df, use_container_width=True)
-                    
-                    # Chart
-                    fig = px.bar(res_df, x="Truck", y="Load (PLT)", title="Capacity Check (Max 33)")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.error("No solution found. Try increasing vehicle capacity or count.")
+                        # Output
+                        res_df = pd.DataFrame(route_data)
+                        
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Total Fleet", len(res_df))
+                        col2.metric("Total Load (PLT)", int(res_df["Load"].sum()))
+                        col3.metric("Avg Utilization", f"{res_df['Utilization (%)'].mean():.1f}%")
+                        
+                        st.subheader("📋 Optimized Dispatch Plan")
+                        st.dataframe(res_df, use_container_width=True)
+                        
+                        fig = px.bar(res_df, x="Truck", y="Load", color="Utilization (%)",
+                                     title="Truck Load Comparison (Max 33 PLT)")
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.error("No feasible solution. Check if a single store order exceeds 33 PLT.")
     else:
-        st.warning("Please upload both CSV files to start.")
+        st.info("Upload CSV files to begin optimization.")
 
 if __name__ == "__main__":
     main()
