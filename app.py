@@ -1,30 +1,15 @@
-"""
-=============================================================================
- SKHIRAT HUB — LOGISTICS OPTIMIZATION PLATFORM (OR-TOOLS VERSION)
-=============================================================================
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
+# ================= CONFIG =================
 
-TRUCK_CAPACITY = {
-    "32T": 33,
-    "19T": 18,
-    "7T": 12
-}
-
+TRUCK_CAPACITY = {"32T": 33, "19T": 18, "7T": 12}
 PRIORITY_STORE = "200"
 
-# ─────────────────────────────────────────────────────────────
-# DATA LOADERS
-# ─────────────────────────────────────────────────────────────
+# ================= LOADERS =================
 
 def load_stores(file):
     df = pd.read_csv(file)
@@ -32,53 +17,60 @@ def load_stores(file):
     df["Store_Code"] = df["Store_Code"].astype(str)
     return df
 
-
 def load_orders(file):
     df = pd.read_csv(file)
     df.columns = df.columns.str.strip()
     df["Store_Code"] = df["Store_Code"].astype(str)
+    df["Fleg_PLT"] = df["Fleg_PLT"].fillna(0).astype(int)
+    df["Sec_PLT"] = df["Sec_PLT"].fillna(0).astype(int)
     df["Total_PLT"] = df["Fleg_PLT"] + df["Sec_PLT"]
     return df
-
 
 def load_tariffs(file):
     df = pd.read_csv(file)
     df.columns = df.columns.str.strip()
     return df
 
-# ─────────────────────────────────────────────────────────────
-# OR-TOOLS ENGINE
-# ─────────────────────────────────────────────────────────────
+# ================= OR-TOOLS CORE =================
 
 def create_data_model(df):
+
+    df = df.reset_index(drop=True)
+
     data = {}
 
-    # demand
+    # DEMAND
     data["demands"] = df["Total_PLT"].tolist()
 
     n = len(df)
 
-    # fake distance matrix (zone-based)
+    # SAFE CHECK
+    if n == 0:
+        return None
+
+    # Distance matrix (zone heuristic)
     matrix = np.zeros((n, n))
 
     for i in range(n):
         for j in range(n):
-            if df.iloc[i]["Zone"] == df.iloc[j]["Zone"]:
-                matrix[i][j] = 10
-            else:
-                matrix[i][j] = 50
+            matrix[i][j] = 10 if df.iloc[i]["Zone"] == df.iloc[j]["Zone"] else 50
 
     data["distance_matrix"] = matrix.tolist()
 
-    # vehicles
-    data["vehicle_capacities"] = [33] * 50
-    data["num_vehicles"] = 50
+    # 🚛 FIX: realistic fleet size
+    data["num_vehicles"] = min(10, n)
+    data["vehicle_capacities"] = [33] * data["num_vehicles"]
+
     data["depot"] = 0
 
     return data
 
 
 def solve_vrp(data):
+
+    if data is None:
+        return None, None, None
+
     manager = pywrapcp.RoutingIndexManager(
         len(data["distance_matrix"]),
         data["num_vehicles"],
@@ -87,7 +79,7 @@ def solve_vrp(data):
 
     routing = pywrapcp.RoutingModel(manager)
 
-    # Distance
+    # COST
     def distance_callback(from_index, to_index):
         return int(
             data["distance_matrix"]
@@ -98,7 +90,7 @@ def solve_vrp(data):
     transit_index = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
 
-    # Demand
+    # DEMAND
     def demand_callback(from_index):
         return int(data["demands"][manager.IndexToNode(from_index)])
 
@@ -112,15 +104,11 @@ def solve_vrp(data):
         "Capacity"
     )
 
-    # solver params
+    # SOLVER
     params = pywrapcp.DefaultRoutingSearchParameters()
-    params.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    )
-    params.local_search_metaheuristic = (
-        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    )
-    params.time_limit.FromSeconds(5)
+    params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    params.time_limit.FromSeconds(3)
 
     solution = routing.SolveWithParameters(params)
 
@@ -128,10 +116,11 @@ def solve_vrp(data):
 
 
 def extract_routes(df, solution, routing, manager):
-    routes = []
 
-    if not solution:
-        return routes
+    if solution is None:
+        return []
+
+    routes = []
 
     for v in range(routing.vehicles()):
         index = routing.Start(v)
@@ -156,73 +145,83 @@ def extract_routes(df, solution, routing, manager):
 
     return routes
 
-# ─────────────────────────────────────────────────────────────
-# STREAMLIT APP
-# ─────────────────────────────────────────────────────────────
+# ================= STREAMLIT =================
 
 def main():
 
-    st.set_page_config(page_title="Skhirat TMS OR-Tools", layout="wide")
+    st.set_page_config(page_title="Skhirat TMS PRO", layout="wide")
 
-    st.title("🚛 Skhirat Hub — OR-Tools Optimization Engine")
+    st.title("🚛 Skhirat Hub — PRO OR-Tools Engine")
 
     # Upload
-    st.sidebar.header("📂 Upload Data")
+    st.sidebar.header("📂 Data")
 
-    stores_file = st.sidebar.file_uploader("Stores CSV")
-    orders_file = st.sidebar.file_uploader("Orders CSV")
-    tariffs_file = st.sidebar.file_uploader("Tariffs CSV")
+    stores_file = st.sidebar.file_uploader("Stores")
+    orders_file = st.sidebar.file_uploader("Orders")
+    tariffs_file = st.sidebar.file_uploader("Tariffs")
 
     if not (stores_file and orders_file and tariffs_file):
-        st.warning("Please upload all files")
+        st.warning("Upload all files")
         return
 
-    # Load
+    # LOAD
     stores = load_stores(stores_file)
     orders = load_orders(orders_file)
-    tariffs = load_tariffs(tariffs_file)
 
-    # Merge
     merged = orders.merge(stores, on="Store_Code", how="left")
 
-    # Priority (Store 200 first)
+    # PRIORITY STORE
     merged = pd.concat([
         merged[merged["Store_Code"] == PRIORITY_STORE],
         merged[merged["Store_Code"] != PRIORITY_STORE]
     ])
 
-    st.subheader("📦 Raw Data")
+    st.subheader("📦 Data Preview")
     st.dataframe(merged)
 
-    # OR-TOOLS
-    st.subheader("⚙️ Optimization Running...")
+    # SAFETY CHECK
+    if len(merged) == 0:
+        st.error("No data after merge")
+        return
 
-    data_model = create_data_model(merged)
-    solution, routing, manager = solve_vrp(data_model)
+    # OPTIMIZATION
+    st.subheader("⚙️ Running OR-Tools Optimization...")
 
-    routes = extract_routes(merged, solution, routing, manager)
+    try:
+        data_model = create_data_model(merged)
+        solution, routing, manager = solve_vrp(data_model)
+
+        if solution is None:
+            st.error("❌ No feasible solution found")
+            return
+
+        routes = extract_routes(merged, solution, routing, manager)
+
+    except Exception as e:
+        st.error(f"Optimization error: {e}")
+        return
 
     df_routes = pd.DataFrame(routes)
 
     # KPIs
-    col1, col2, col3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
 
-    col1.metric("🚛 Trucks Used", len(df_routes))
-    col2.metric("📦 Total Load", int(df_routes["Load"].sum()) if not df_routes.empty else 0)
-    col3.metric("📍 Avg Stops", round(df_routes["Stops"].mean(), 2) if not df_routes.empty else 0)
+    c1.metric("🚛 Trucks", len(df_routes))
+    c2.metric("📦 Load", int(df_routes["Load"].sum()) if not df_routes.empty else 0)
+    c3.metric("📍 Avg Stops", round(df_routes["Stops"].mean(), 2) if not df_routes.empty else 0)
 
-    # Table
-    st.subheader("📋 Optimized Routes")
+    # TABLE
+    st.subheader("📋 Routes")
     st.dataframe(df_routes)
 
-    # Chart
+    # CHART
     if not df_routes.empty:
-        fig = px.bar(df_routes, x="Truck", y="Load", title="Truck Load Distribution")
+        fig = px.bar(df_routes, x="Truck", y="Load", title="Truck Utilization")
         st.plotly_chart(fig)
 
-    st.success("✅ Optimization Complete (OR-Tools Active)")
+    st.success("✅ Production OR-Tools Optimization Complete")
 
-# ─────────────────────────────────────────────────────────────
+# ================= RUN =================
 
 if __name__ == "__main__":
     main()
