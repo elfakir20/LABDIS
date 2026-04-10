@@ -916,3 +916,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+with tab3:
+        render_zone_summary(result_df)
+
+    with tab4:
+        st.subheader("🔍 Raw Data Preview")
+        st.write(merged)
+
+if __name__ == "__main__":
+    main()
