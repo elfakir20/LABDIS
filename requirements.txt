@@ -2,3 +2,7 @@ streamlit
 pandas
 numpy
 plotly
+streamlit
+pandas==2.1.0
+numpy
+plotly
