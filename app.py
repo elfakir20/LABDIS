@@ -751,7 +751,7 @@ def render_manifest_table(df: pd.DataFrame):
     styled = (
         df[display_cols]
         .style
-        .applymap(util_color, subset=["Utilization_%"])
+        .map(util_color, subset=["Utilization_%"])
         .format({
             "Total_Cost_MAD": "{:,.0f} MAD",
             "Cost_Per_PLT":   "{:.1f} MAD",
